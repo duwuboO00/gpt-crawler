@@ -6,27 +6,33 @@ import { Config, configSchema } from "./config.js";
 import { Page } from "playwright";
 import { isWithinTokenLimit } from "gpt-tokenizer";
 import { PathLike } from "fs";
+// 匯入 turndown
+import TurndownService from "turndown";
 
 let pageCounter = 0;
 let crawler: PlaywrightCrawler;
 
+// 修改 getPageHtml 以回傳 innerHTML
 export function getPageHtml(page: Page, selector = "body") {
   return page.evaluate((selector) => {
-    // Check if the selector is an XPath
+    // 檢查選擇器是否為 XPath
     if (selector.startsWith("/")) {
       const elements = document.evaluate(
         selector,
         document,
         null,
-        XPathResult.ANY_TYPE,
+        // 取得單一節點以便取得 innerHTML
+        XPathResult.FIRST_ORDERED_NODE_TYPE,
         null,
       );
-      let result = elements.iterateNext();
-      return result ? result.textContent || "" : "";
+      const node = elements.singleNodeValue;
+      // 確保是 HTMLElement 以取得 innerHTML，否則回退到 textContent
+      return node instanceof HTMLElement ? node.innerHTML || "" : node?.textContent || "";
     } else {
-      // Handle as a CSS selector
+      // 處理 CSS 選擇器
       const el = document.querySelector(selector) as HTMLElement | null;
-      return el?.innerText || "";
+      // 回傳 innerHTML 而不是 innerText
+      return el?.innerHTML || "";
     }
   }, selector);
 }
@@ -51,12 +57,14 @@ export async function waitForXPath(page: Page, xpath: string, timeout: number) {
 export async function crawl(config: Config) {
   configSchema.parse(config);
 
+  // 建立 TurndownService 實例
+  const turndownService = new TurndownService();
+
   if (process.env.NO_CRAWL !== "true") {
-    // PlaywrightCrawler crawls the web using a headless
-    // browser controlled by the Playwright library.
+    // PlaywrightCrawler 使用由 Playwright 函式庫控制的無頭瀏覽器來爬取網頁。
     crawler = new PlaywrightCrawler(
       {
-        // Use the requestHandler to process each of the crawled pages.
+        // 使用 requestHandler 來處理每個爬取的頁面。
         async requestHandler({ request, page, enqueueLinks, log, pushData }) {
           const title = await page.title();
           pageCounter++;
@@ -64,8 +72,8 @@ export async function crawl(config: Config) {
             `Crawling: Page ${pageCounter} / ${config.maxPagesToCrawl} - URL: ${request.loadedUrl}...`,
           );
 
-          // Use custom handling for XPath selector
-          if (config.selector) {
+          // ... (waitForSelector 邏輯保持不變) ...
+           if (config.selector) {
             if (config.selector.startsWith("/")) {
               await waitForXPath(
                 page,
@@ -79,17 +87,21 @@ export async function crawl(config: Config) {
             }
           }
 
-          const html = await getPageHtml(page, config.selector);
+          // 取得原始 HTML 內容
+          const rawHtml = await getPageHtml(page, config.selector);
 
-          // Save results as JSON to ./storage/datasets/default
-          await pushData({ title, url: request.loadedUrl, html });
+          // 將原始 HTML 轉換為 Markdown
+          const markdown = turndownService.turndown(rawHtml);
+
+          // 將結果（包含 Markdown）儲存為 JSON
+          // 注意：欄位名稱仍為 'html'，但現在包含 Markdown 內容
+          await pushData({ title, url: request.loadedUrl, html: markdown });
 
           if (config.onVisitPage) {
             await config.onVisitPage({ page, pushData });
           }
 
-          // Extract links from the current page
-          // and add them to the crawling queue.
+          // 從目前頁面提取連結並加入爬取佇列。
           await enqueueLinks({
             globs:
               typeof config.match === "string" ? [config.match] : config.match,
